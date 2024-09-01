@@ -1,9 +1,14 @@
+import base64
 import json
+import pickle
+import sys
+import warnings
 
 from langchain_core.load import dumps
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from langchain_core.output_parsers import StrOutputParser
+
+warnings.filterwarnings("ignore")
 
 prompt = ChatPromptTemplate.from_messages([
     (
@@ -16,7 +21,12 @@ prompt = ChatPromptTemplate.from_messages([
     )
 ])
 llm = ChatOpenAI(model="gpt-4o-mini")
-chain = prompt | llm | StrOutputParser()
 
-with open("./chain.json", "w") as fp:
-    json.dump(dumps(chain, pretty=True), fp)
+with open("./llm.json", "w") as fp:
+    json.dump(dumps(llm, pretty=True), fp)
+
+with open("./llm.input", "w") as fp:
+    llm_input = prompt.invoke({"input": sys.argv[1]})
+    llm_input_dump = pickle.dumps(llm_input)
+    llm_input_base64 = base64.b64encode(llm_input_dump)
+    fp.write(llm_input_base64.decode())

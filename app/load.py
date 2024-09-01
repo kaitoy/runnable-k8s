@@ -1,12 +1,20 @@
+import base64
 import json
-import sys
+import pickle
+import warnings
 
 from langchain_core.load import loads
+from langchain_core.output_parsers import StrOutputParser
 
-with open("./chain.json", "r") as fp:
-    chain = loads(json.load(fp))
+warnings.filterwarnings("ignore")
 
-response = chain.invoke({
-    "input": sys.argv[1],
-})
+with open("./llm.json", "r") as fp:
+    llm = loads(json.load(fp))
+
+with open("./llm.input", "r") as fp:
+    llm_input_base64 = base64.b64decode(fp.read())
+    llm_input = pickle.loads(llm_input_base64)
+
+chain = llm | StrOutputParser()
+response = chain.invoke(llm_input)
 print(response)
