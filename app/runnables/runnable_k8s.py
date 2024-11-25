@@ -235,17 +235,3 @@ class RunnableK8s(Runnable[Input, Output]):
         **kwargs: Any,
     ) -> Output:
         return self._call_with_config(self._invoke, input, config, **kwargs)
-
-    async def _ainvoke(
-        self,
-        input: Input,
-    ) -> Output:
-        return self._invoke(input)
-
-    async def ainvoke(
-        self,
-        input: Input,
-        config: Optional[RunnableConfig] = None,
-        **kwargs: Any,
-    ) -> Output:
-        return await self._acall_with_config(self._ainvoke, input, config, **kwargs)
