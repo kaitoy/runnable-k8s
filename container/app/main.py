@@ -1,3 +1,4 @@
+import argparse
 import base64
 import pickle
 import sys
@@ -9,6 +10,10 @@ from langchain_core.runnables.base import Runnable
 from langchain_core.runnables.utils import Input, Output
 
 warnings.filterwarnings("ignore")
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--stream", action="store_true")
+args = parser.parse_args()
 
 def read_input() -> str:
     data = ''
@@ -39,7 +44,13 @@ runnable =deserialize_runnable(runnable_base64)
 input_base64 = read_input()
 runnable_input = deserialize_input(input_base64)
 
-output = runnable.invoke(runnable_input)
+if args.stream:
+    for chunk in runnable.stream(runnable_input):
+        print(serialize_output(chunk))
+else:
+    output = runnable.invoke(runnable_input)
+    print(serialize_output(output))
 
-print(serialize_output(output))
-print('\n')
+print('***')
+
+read_input()

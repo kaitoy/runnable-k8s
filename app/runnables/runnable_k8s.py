@@ -2,7 +2,7 @@ import base64
 import pickle
 import time
 import uuid
-from typing import Any, List, Optional, Type
+from typing import Any, Generator, Iterator, List, Optional, Type
 
 from kubernetes import client, config, watch
 from kubernetes.client import Configuration
@@ -29,7 +29,8 @@ class RunnableK8s(Runnable[Input, Output]):
         bound: Runnable[Input, Output],
         k8s_config: Optional[Configuration] = None,
         k8s_namespace: str = "default",
-        k8s_container_image: str = "kaitoy/runnable-k8s-ee",
+        k8s_container_image: str = "kaitoy/runnable-k8s-ee:latest",
+        k8s_image_pull_policy: Optional[str] = None,
         k8s_secret_name: str = "runnable-k8s-ee",
         k8s_delete_runner_pod: bool = True,
         # **kwargs: Any
@@ -38,6 +39,7 @@ class RunnableK8s(Runnable[Input, Output]):
         self.bound = bound
         self.k8s_namespace = k8s_namespace
         self.k8s_container_image = k8s_container_image
+        self.k8s_image_pull_policy = k8s_image_pull_policy
         self.k8s_secret_name = k8s_secret_name
         self.k8s_delete_runner_pod = k8s_delete_runner_pod
         # super().__init__(**kwargs)
@@ -99,7 +101,7 @@ class RunnableK8s(Runnable[Input, Output]):
         )
         return super().get_name(suffix, name=name)
 
-    def _run_pod(self) -> str:
+    def _run_pod(self, stream_: bool = False) -> str:
         with client.ApiClient() as api_client:
             api_instance = client.CoreV1Api(api_client)
             uid = str(uuid.uuid4())
@@ -116,6 +118,8 @@ class RunnableK8s(Runnable[Input, Output]):
                     'containers': [{
                         'name': 'runnable-k8s-ee',
                         'image': self.k8s_container_image,
+                        'imagePullPolicy': self.k8s_image_pull_policy,
+                        'args': ['--stream'] if stream_ else None,
                         'stdin': True,
                         'envFrom': [{
                             'secretRef': {
@@ -148,7 +152,7 @@ class RunnableK8s(Runnable[Input, Output]):
             except ApiException as e:
                 raise LangChainException(f'Failed to watch pod: {self.k8s_namespace}/{pod_name}') from e
 
-    def _connect_to_pod(self, pod_name: str, runnable_input: Input) -> str:
+    def _connect_to_pod(self, pod_name: str, runnable_input: Input) -> Generator[str, None, None]:
         input_base64 = self._serialize_runnable_input(runnable_input)
         runnable_base64 = self._serialize_runnable(self.bound)
 
@@ -178,21 +182,26 @@ class RunnableK8s(Runnable[Input, Output]):
                         line = resp.readline_stdout()
 
                         if line is None:
-                            break
+                            continue
+                        if line == '':
+                            continue
                         if line.startswith('#'):
                             continue
-                        if line == '\n':
+                        if line == '***':
                             break
 
-                        output_base64 += line.rstrip()
+                        output_base64 = line
+                        yield output_base64
                     if resp.peek_stderr():
                         raise LangChainException(f'An error occurred in runner pod: {resp.read_stderr()}')
                     else:
-                        time.sleep(1)
+                        time.sleep(0.1)
+
+                if resp.is_open():
+                    resp.write_stdin('\n')
 
                 if len(output_base64) == 0:
                     raise LangChainException(f"Runner pod didn't output anything: {self.k8s_namespace}/{pod_name}")
-                return output_base64
             except ApiException as e:
                 raise LangChainException(f'Failed to connect to runner pod: {self.k8s_namespace}/{pod_name}') from e
 
@@ -223,7 +232,8 @@ class RunnableK8s(Runnable[Input, Output]):
         input: Input,
     ) -> Output:
         pod_name = self._run_pod()
-        output_base64 = self._connect_to_pod(pod_name, input)
+        output_base64_gen = self._connect_to_pod(pod_name, input)
+        output_base64 = list(output_base64_gen)[0]
         if self.k8s_delete_runner_pod:
             self._delete_pod(pod_name)
         return self._deserialize_runnable_output(output_base64)
@@ -235,3 +245,16 @@ class RunnableK8s(Runnable[Input, Output]):
         **kwargs: Any,
     ) -> Output:
         return self._call_with_config(self._invoke, input, config, **kwargs)
+
+    def stream(
+        self,
+        input: Input,
+        config: Optional[RunnableConfig] = None,
+        **kwargs: Optional[Any],
+    ) -> Iterator[Output]:
+        pod_name = self._run_pod(stream_=True)
+        output_base64_gen = self._connect_to_pod(pod_name, input)
+        for output_base64 in output_base64_gen:
+            yield self._deserialize_runnable_output(output_base64)
+        if self.k8s_delete_runner_pod:
+            self._delete_pod(pod_name)
