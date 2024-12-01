@@ -1,8 +1,10 @@
+import asyncio
 import base64
 import pickle
 import time
 import uuid
-from typing import Any, Generator, Iterator, List, Optional, Type
+from typing import (Any, AsyncIterator, Generator, Iterator, List, Optional,
+                    Type)
 
 from kubernetes import client, config, watch
 from kubernetes.client import Configuration
@@ -12,7 +14,7 @@ from langchain_core.exceptions import LangChainException
 from langchain_core.load import dumps
 from langchain_core.pydantic_v1 import BaseModel
 from langchain_core.runnables.base import Runnable, RunnableSerializable
-from langchain_core.runnables.config import RunnableConfig
+from langchain_core.runnables.config import RunnableConfig, run_in_executor
 from langchain_core.runnables.graph import Graph
 from langchain_core.runnables.utils import ConfigurableFieldSpec, Input, Output
 
@@ -142,6 +144,70 @@ class RunnableK8s(Runnable[Input, Output]):
             except ApiException as e:
                 raise LangChainException(f'Failed to watch pod: {self.k8s_namespace}/{pod_name}') from e
 
+    class AsyncOutput():
+
+        def __init__(
+            self,
+            k8s_namespace: str,
+            pod_name: str,
+            runnable_base64: str,
+            input_base64: str
+        ):
+            self.k8s_namespace = k8s_namespace
+            self.pod_name = pod_name
+            self.runnable_base64 =runnable_base64
+            self.input_base64 = input_base64
+
+        async def __aiter__(self):
+            with client.ApiClient() as api_client:
+                api_instance = client.CoreV1Api(api_client)
+                try:
+                    resp = stream(
+                        api_instance.connect_get_namespaced_pod_attach,
+                        name=self.pod_name,
+                        namespace=self.k8s_namespace,
+                        stderr=True,
+                        stdin=True,
+                        stdout=True,
+                        tty=True,
+                        _preload_content=False
+                    )
+
+                    resp.write_stdin(self.runnable_base64)
+                    resp.write_stdin('\n\n')
+                    resp.write_stdin(self.input_base64)
+                    resp.write_stdin('\n\n')
+
+                    output_base64 = ''
+                    while resp.is_open():
+                        resp.update(timeout=1)
+                        if resp.peek_stdout():
+                            line = resp.readline_stdout()
+
+                            if line is None:
+                                continue
+                            if line == '':
+                                continue
+                            if line.startswith('#'):
+                                continue
+                            if line == '***':
+                                break
+
+                            output_base64 = line
+                            yield output_base64
+                        if resp.peek_stderr():
+                            raise LangChainException(f'An error occurred in runner pod: {resp.read_stderr()}')
+                        else:
+                            await asyncio.sleep(0.1)
+
+                    if resp.is_open():
+                        resp.write_stdin('\n')
+
+                    if len(output_base64) == 0:
+                        raise LangChainException(f"Runner pod didn't output anything: {self.k8s_namespace}/{self.pod_name}")
+                except ApiException as e:
+                    raise LangChainException(f'Failed to connect to runner pod: {self.k8s_namespace}/{self.pod_name}') from e
+
     def _connect_to_pod(self, pod_name: str, runnable_input: Input) -> Generator[str, None, None]:
         input_base64 = self._serialize_runnable_input(runnable_input)
         runnable_base64 = self._serialize_runnable(self.bound)
@@ -248,3 +314,25 @@ class RunnableK8s(Runnable[Input, Output]):
             yield self._deserialize_runnable_output(output_base64)
         if self.k8s_delete_runner_pod:
             self._delete_pod(pod_name)
+
+    async def astream(
+        self,
+        input: Input,
+        config: Optional[RunnableConfig] = None,
+        **kwargs: Optional[Any],
+    ) -> AsyncIterator[Output]:
+        pod_name = await run_in_executor(config, self._run_pod, stream_=True)
+        input_base64 = self._serialize_runnable_input(input)
+        runnable_base64 = self._serialize_runnable(self.bound)
+
+        ao = RunnableK8s.AsyncOutput(
+            self.k8s_namespace,
+            pod_name,
+            runnable_base64,
+            input_base64,
+        )
+
+        async for output_base64 in ao:
+            yield self._deserialize_runnable_output(output_base64)
+        if self.k8s_delete_runner_pod:
+            await run_in_executor(config, self._delete_pod, pod_name)
