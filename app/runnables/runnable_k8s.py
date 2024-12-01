@@ -14,8 +14,7 @@ from langchain_core.pydantic_v1 import BaseModel
 from langchain_core.runnables.base import Runnable, RunnableSerializable
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.runnables.graph import Graph
-from langchain_core.runnables.utils import (ConfigurableFieldSpec, Input,
-                                            Output, create_model)
+from langchain_core.runnables.utils import ConfigurableFieldSpec, Input, Output
 
 
 class RunnableK8s(Runnable[Input, Output]):
@@ -51,13 +50,7 @@ class RunnableK8s(Runnable[Input, Output]):
     def get_input_schema(
         self, config: Optional[RunnableConfig] = None
     ) -> Type[BaseModel]:
-        return create_model(
-            self.get_name("Input"),
-            __root__=(
-                self.bound.get_input_schema(config),
-                None,
-            ),
-        )
+        return self.bound.get_input_schema(config)
 
     @property
     def OutputType(self) -> Output:
@@ -66,14 +59,7 @@ class RunnableK8s(Runnable[Input, Output]):
     def get_output_schema(
         self, config: Optional[RunnableConfig] = None
     ) -> Type[BaseModel]:
-        schema = self.bound.get_output_schema(config)
-        return create_model(
-            self.get_name("Output"),
-            __root__=(
-                schema,
-                None,
-            ),
-        )
+        return self.bound.get_output_schema(config)
 
     @property
     def config_specs(self) -> List[ConfigurableFieldSpec]:
@@ -100,6 +86,10 @@ class RunnableK8s(Runnable[Input, Output]):
             or f"RunnableK8s<{self.bound.get_name()}>"
         )
         return super().get_name(suffix, name=name)
+
+
+    def bind(self, **kwargs: Any) -> 'RunnableK8s[Input, Output]':
+        return RunnableK8s(bound=self.bound.bind(**kwargs))
 
     def _run_pod(self, stream_: bool = False) -> str:
         with client.ApiClient() as api_client:
